@@ -9,6 +9,9 @@ import (
 	"gorm.io/gorm"
 )
 
+// Employee is the join example's root model. DepartmentID is nullable, so an
+// employee may have no department; TenantID is a required tenant scope and is
+// never supplied by request parameters. Soft deletion applies to the table.
 type Employee struct {
 	ID           uint
 	Name         string `gorm:"size:100"`
@@ -17,6 +20,8 @@ type Employee struct {
 	DeletedAt    gorm.DeletedAt
 }
 
+// Department is the joined model. TenantID scopes rows per tenant, and
+// DeletedAt makes the join apply the soft-delete filter for this table too.
 type Department struct {
 	ID        uint
 	Name      string `gorm:"size:100"`
@@ -24,6 +29,9 @@ type Department struct {
 	DeletedAt gorm.DeletedAt
 }
 
+// EmployeeDepartment is the flat DTO returned by the join example.
+// DepartmentName is a pointer because the LEFT JOIN can produce NULL for
+// employees without a department; the other fields cannot be NULL.
 type EmployeeDepartment struct {
 	EmployeeID     uint    `json:"employeeId"`
 	EmployeeName   string  `json:"employeeName"`

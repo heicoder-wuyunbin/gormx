@@ -10,23 +10,57 @@ import (
 )
 
 var (
+	// ErrInvalidField reports an unknown, unmapped or unusable model field. It
+	// also covers selectors that do not return the address of a mapped field,
+	// primary keys passed to Update, and unbound or out-of-scope join columns.
+	// Match it with errors.Is.
 	ErrInvalidField = errors.New("gormx: invalid model field")
+	// ErrInvalidQuery reports a malformed query: an empty condition group, a
+	// join whose ON clause does not link a new table to an earlier one, duplicate
+	// aliases, an unsupported model query clause, or an attempt to bypass the
+	// typed API with raw SQL.
 	ErrInvalidQuery = errors.New("gormx: invalid query")
-	ErrUnsafeWrite  = errors.New("gormx: write requires a restrictive condition")
-	ErrInvalidPage  = errors.New("gormx: invalid pagination")
+	// ErrUnsafeWrite reports an Update or Delete whose conditions contain no
+	// restrictive predicate, so the statement could affect the whole table.
+	ErrUnsafeWrite = errors.New("gormx: write requires a restrictive condition")
+	// ErrInvalidPage reports pagination input rejected by PageRequest.normalize:
+	// negative values, Size above MaxPageSize, or an offset that overflows int.
+	ErrInvalidPage = errors.New("gormx: invalid pagination")
+	// ErrInvalidModel reports a model that is not a non-pointer struct, a nil
+	// join table, or a DTO without the required struct shape.
 	ErrInvalidModel = errors.New("gormx: model must be a non-pointer struct")
-	ErrInvalidID    = errors.New("gormx: invalid primary key")
+	// ErrInvalidID reports an invalid primary key for the ByID methods: nil,
+	// empty, unsupported type, or a malformed numeric string.
+	ErrInvalidID = errors.New("gormx: invalid primary key")
 )
 
+// columnRef lazily resolves a clause column against a parsed schema. It is the
+// shared indirection that lets predicates remain schema-independent until
+// execution.
 type columnRef[T any] func(*schema.Schema) (clause.Column, error)
 
-// Predicate binds a condition to its model type. Its zero value is invalid.
+// Predicate is an immutable, lazily-built condition bound to model T.
+//
+// Predicates are not compiled at construction; they are resolved against the
+// schema when a DAO executes the query. This lets one predicate be reused across
+// handles with different naming strategies. The zero value is invalid: passing
+// one to Where, All or Any makes compilation fail with ErrInvalidQuery.
+//
+// restrictive marks conditions that cannot be a tautology. Update and Delete
+// require at least one restrictive top-level predicate so expressions such as
+// NotIn(empty) cannot silently become a full-table write. Comparisons and IsNull
+// are always restrictive; In(empty) is a contradiction and stays restrictive;
+// NotIn(empty) is a tautology and is not restrictive. An OR group is restrictive
+// only when it has members and every member is restrictive.
 type Predicate[T any] struct {
 	build func(*schema.Schema) (clause.Expression, error)
 	// restrictive tracks obvious tautologies, so NotIn(empty) cannot enable a full-table write.
 	restrictive bool
 }
 
+// stringColumn resolves a Go field name or database column name against the
+// schema and always targets the current table. Unknown or unmapped names return
+// ErrInvalidField when the predicate is built.
 func stringColumn[T any](name string) columnRef[T] {
 	return func(s *schema.Schema) (clause.Column, error) {
 		field := s.LookUpField(name)
@@ -37,6 +71,9 @@ func stringColumn[T any](name string) columnRef[T] {
 	}
 }
 
+// comparison builds a lazy, always-restrictive comparison. A nil ref or an
+// unknown operator surfaces as ErrInvalidField/ErrInvalidQuery at build time.
+// A nil value produces IS NULL for "eq" and IS NOT NULL for "ne".
 func comparison[T any](ref columnRef[T], op string, value any) Predicate[T] {
 	return Predicate[T]{
 		restrictive: true,
@@ -72,6 +109,11 @@ func comparison[T any](ref columnRef[T], op string, value any) Predicate[T] {
 	}
 }
 
+// membership builds a lazy IN/NOT IN predicate. Values are copied at
+// construction so later caller mutation cannot change the query. An empty list
+// compiles to 1 = 0 for IN (matches nothing, restrictive) and 1 = 1 for NOT IN
+// (matches everything, non-restrictive). A non-slice, non-nil value is rejected
+// at build time.
 func membership[T any](ref columnRef[T], values any, negate bool) Predicate[T] {
 	rv := reflect.ValueOf(values)
 	var copied []any
@@ -112,16 +154,27 @@ func membership[T any](ref columnRef[T], values any, negate bool) Predicate[T] {
 	}
 }
 
-// All groups conditions with AND. An empty group is rejected.
+// All groups predicates with AND, copying the arguments.
+//
+// An empty group is rejected with ErrInvalidQuery when the query is built. The
+// group is restrictive if any member is restrictive, because an AND can only
+// narrow the result set.
 func All[T any](predicates ...Predicate[T]) Predicate[T] {
 	return group(false, predicates)
 }
 
-// Any groups conditions with OR. An empty group is rejected.
+// Any groups predicates with OR, copying the arguments.
+//
+// An empty group is rejected with ErrInvalidQuery when the query is built. The
+// group is restrictive only when it has members and every member is
+// restrictive, because a single tautological branch would make the whole OR
+// match everything.
 func Any[T any](predicates ...Predicate[T]) Predicate[T] {
 	return group(true, predicates)
 }
 
+// group builds an AND/OR node and derives its restrictive flag from the members.
+// The zero value of a member (a nil build function) fails when the group builds.
 func group[T any](or bool, predicates []Predicate[T]) Predicate[T] {
 	ps := append([]Predicate[T](nil), predicates...)
 	restrictive := or && len(ps) > 0

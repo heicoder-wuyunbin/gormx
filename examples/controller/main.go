@@ -15,6 +15,9 @@ import (
 	"gorm.io/gorm"
 )
 
+// User is the model used by the controller example. It has a numeric primary
+// key and a soft-delete marker, so Delete issues an UPDATE instead of removing
+// the row. JSON tags shape the API response; the DeletedAt field is hidden.
 type User struct {
 	ID        uint           `json:"id" gorm:"primaryKey"`
 	Name      string         `json:"name" gorm:"size:100;index"`

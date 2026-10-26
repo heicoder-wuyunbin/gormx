@@ -18,9 +18,22 @@ type joinStep struct {
 	on    JoinOn
 }
 
-// JoinQuery is an immutable, read-only flat-result query.
-// Use root DB/transaction handles and express all permission filters explicitly.
-// As with NewDAO, pre-existing GORM query clauses and Scopes are not retained.
+// JoinQuery is an immutable, read-only query that returns flat rows from many
+// tables.
+//
+// Every chain method (LeftJoin, InnerJoin, Where, Select, OrderBy, ...) returns a
+// new query and leaves the receiver untouched, so one base query can be shared
+// and branched. Invalid input is stored inside the returned query and surfaces
+// from execution instead of panicking; chaining never clears a recorded error.
+//
+// Construct it with NewJoinQuery using a root or transaction *gorm.DB. All
+// permission and tenant filters must be expressed explicitly: pre-existing GORM
+// clauses and Scopes on the handle are not retained, and model-level query
+// clauses other than soft delete make compilation fail rather than being
+// silently dropped.
+//
+// Results are scanned into a DTO, never a model, so projections are mandatory
+// and each output needs an explicit alias.
 type JoinQuery struct {
 	db          *gorm.DB
 	root        *tableBinding
@@ -31,6 +44,13 @@ type JoinQuery struct {
 	err         error
 }
 
+// NewJoinQuery starts a join query rooted at root.
+//
+// db may be a root or transaction handle; nil and handles that already carry an
+// error are rejected. root must be a non-nil table instance such as
+// TableOf[Model]("alias") whose model is a struct. Eager validation also checks
+// the alias and parses the root schema, so a bad model fails here rather than on
+// first execution. Any clauses already pending on db are discarded.
 func NewJoinQuery(db *gorm.DB, root JoinTable) (*JoinQuery, error) {
 	if db == nil {
 		return nil, errors.New("gormx: nil database")
@@ -78,10 +98,24 @@ func (q *JoinQuery) clone() *JoinQuery {
 	return &next
 }
 
+// LeftJoin appends a LEFT JOIN. Rows from the new table may be NULL, so the DTO
+// fields receiving its projections should be nullable (pointers or sql.Null*).
+//
+// The ON clause must link the new table to a table added earlier; extra
+// predicates supplied through JoinOn.And are ANDed with that link. A nil table
+// is recorded as an error on the returned query; duplicate aliases are detected
+// when the query compiles.
 func (q *JoinQuery) LeftJoin(table JoinTable, on JoinOn) *JoinQuery {
 	return q.addJoin(table, on, clause.LeftJoin)
 }
 
+// InnerJoin appends an INNER JOIN. Only rows with a match on both sides are
+// returned.
+//
+// The ON clause must link the new table to a table added earlier; extra
+// predicates supplied through JoinOn.And are ANDed with that link. A nil table
+// is recorded as an error on the returned query; duplicate aliases are detected
+// when the query compiles.
 func (q *JoinQuery) InnerJoin(table JoinTable, on JoinOn) *JoinQuery {
 	return q.addJoin(table, on, clause.InnerJoin)
 }
@@ -96,12 +130,18 @@ func (q *JoinQuery) addJoin(table JoinTable, on JoinOn, kind clause.JoinType) *J
 	return next
 }
 
+// Where appends predicates, ANDed with every other top-level predicate.
+// Predicates are compiled only at execution, when table scope is known, so a
+// predicate that references a table which has not been joined fails there with
+// ErrInvalidField rather than at construction.
 func (q *JoinQuery) Where(predicates ...JoinPredicate) *JoinQuery {
 	next := q.clone()
 	next.predicates = append(next.predicates, predicates...)
 	return next
 }
 
+// WhereIf appends predicates only when condition is true; otherwise it returns
+// an unchanged copy. Arguments are evaluated before the call either way.
 func (q *JoinQuery) WhereIf(condition bool, predicates ...JoinPredicate) *JoinQuery {
 	if !condition {
 		return q.clone()
@@ -109,13 +149,20 @@ func (q *JoinQuery) WhereIf(condition bool, predicates ...JoinPredicate) *JoinQu
 	return q.Where(predicates...)
 }
 
-// Select replaces the projection. Wildcards and raw SQL are intentionally unsupported.
+// Select replaces the projection; it does not append, and calling it twice keeps
+// only the last list. Wildcards and raw SQL are intentionally unsupported.
+//
+// JoinList and JoinPage require at least one projection, and every projection
+// alias must be unique and match a readable DTO database field.
 func (q *JoinQuery) Select(projections ...Projection) *JoinQuery {
 	next := q.clone()
 	next.projections = append([]Projection(nil), projections...)
 	return next
 }
 
+// OrderBy appends ordering by table-bound columns. Count ignores ordering;
+// JoinList and JoinPage apply it. JoinPage additionally appends primary keys of
+// participating tables as tie-breakers.
 func (q *JoinQuery) OrderBy(orders ...JoinOrder) *JoinQuery {
 	next := q.clone()
 	next.orders = append(next.orders, orders...)
@@ -259,8 +306,12 @@ func (q *JoinQuery) base(ctx context.Context, plan joinPlan) *gorm.DB {
 	return db
 }
 
-// Count counts joined result rows, not distinct root entities.
-// A projection is not required for Count.
+// Count returns the number of JOIN result rows, not distinct root entities.
+//
+// A projection is not required. Because a one-to-many join duplicates the root
+// entity once per match, this number can exceed the number of parents; use a
+// native distinct query when that is the value you need. Count and a later read
+// are separate statements, so concurrent writes can make them disagree.
 func (q *JoinQuery) Count(ctx context.Context) (int64, error) {
 	plan, err := q.compile()
 	if err != nil {
@@ -310,7 +361,15 @@ func joinRead[R any](ctx context.Context, q *JoinQuery, plan joinPlan, limit, of
 	return records, nil
 }
 
-// JoinList scans explicit output aliases into a flat DTO. It has no implicit limit.
+// JoinList scans every joined row into a flat DTO R using the explicit
+// projections.
+//
+// Select(...As(...)) is required, and each alias must map to a readable DTO
+// field by database name. There is no implicit limit, so the whole result set is
+// materialized; use JoinPage for request-facing endpoints. Rows are read with
+// Scan rather than model queries, so AfterFind hooks and DTO soft-delete filters
+// do not run. Use nullable DTO fields for LEFT JOINs. The returned slice is
+// always non-nil.
 func JoinList[R any](ctx context.Context, q *JoinQuery) ([]R, error) {
 	plan, err := q.compile()
 	if err != nil {
@@ -322,9 +381,19 @@ func JoinList[R any](ctx context.Context, q *JoinQuery) ([]R, error) {
 	return joinRead[R](ctx, q, plan, 0, 0)
 }
 
-// JoinPage paginates joined rows, never deduplicates root entities and always
-// performs COUNT then SELECT on success. Use nullable DTO fields for LEFT JOINs.
-// Primary keys of all participating tables provide ordering tie-breakers.
+// JoinPage returns one page of joined rows.
+//
+// Pagination counts JOIN result rows and never deduplicates root entities, so a
+// one-to-many join can split one parent across pages. To page parents with
+// children, select distinct parents first and load children separately.
+//
+// On success it performs COUNT then SELECT with LIMIT/OFFSET. The request is
+// validated and defaulted by PageRequest.normalize: negative values, oversized
+// Size and offset overflow return an error wrapping ErrInvalidPage. Primary keys
+// of every participating table are appended as tie-breakers when not already
+// ordered. Select(...As(...)) is required, and use nullable DTO fields for LEFT
+// JOINs. Records is always non-nil. The two statements are not a shared
+// snapshot.
 func JoinPage[R any](ctx context.Context, q *JoinQuery, request PageRequest) (*Page[R], error) {
 	r, offset, err := request.normalize()
 	if err != nil {

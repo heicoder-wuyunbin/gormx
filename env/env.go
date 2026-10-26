@@ -21,34 +21,72 @@ var ErrInvalidConfig = errors.New("gormx/env: invalid mysql config")
 // Neutral fallbacks used when neither the environment nor the caller's
 // defaults provide a value. They describe the protocol and pool, not a host.
 const (
-	DefaultPort            = 3306
-	DefaultCharset         = "utf8mb4"
-	DefaultMaxOpenConns    = 20
-	DefaultMaxIdleConns    = 5
+	// DefaultPort is the MySQL port applied when neither configuration nor the
+	// environment supplies one. Valid ports are 1-65535.
+	DefaultPort = 3306
+	// DefaultCharset is the connection charset applied when none is supplied.
+	// It is passed to the driver as the "charset" parameter.
+	DefaultCharset = "utf8mb4"
+	// DefaultMaxOpenConns is the default database/sql maximum open connection
+	// count. A value of 0 here means "use this default", not "unlimited".
+	DefaultMaxOpenConns = 20
+	// DefaultMaxIdleConns is the default database/sql idle connection count.
+	DefaultMaxIdleConns = 5
+	// DefaultConnMaxLifetime is how long a pooled connection may be reused
+	// before being closed. Keep it below any server or proxy idle timeout.
 	DefaultConnMaxLifetime = 5 * time.Minute
-	DefaultConnectTimeout  = 10 * time.Second
+	// DefaultConnectTimeout bounds each initial ping attempt when no timeout is
+	// configured, so startup cannot hang indefinitely.
+	DefaultConnectTimeout = 10 * time.Second
 )
 
 // MySQLConfig describes one MySQL connection.
 //
 // DSN, when non-empty, overrides every other field and is passed to the driver
-// unchanged; it must carry parseTime=True on its own. Remaining zero values
-// fall back to the neutral constants above, while Host, User, Password and
-// Database have no built-in default.
+// unchanged; it must carry parseTime=True on its own, or time.Time scanning
+// will fail. Remaining zero values fall back to the neutral constants above,
+// while Host, User, Password and Database have no built-in default and must be
+// supplied by defaults or the environment.
+//
+// Load validates the configuration and reports ErrInvalidConfig for missing or
+// malformed values. BuildDSN and Open validate again, so a hand-built config is
+// never used silently.
 type MySQLConfig struct {
-	DSN      string
-	Host     string
-	Port     int
-	User     string
+	// DSN is a complete driver DSN. When set, it takes precedence over all
+	// other connection fields, including Host and Port, which are then ignored.
+	DSN string
+	// Host is the MySQL host name or IP address. It is required unless DSN is
+	// set; Address never exposes credentials.
+	Host string
+	// Port is the TCP port. Zero means DefaultPort.
+	Port int
+	// User is the login user. It has no default.
+	User string
+	// Password is the login password, taken verbatim by Load so spaces are
+	// preserved. It has no default.
 	Password string
+	// Database is the schema name (env variable suffix NAME). It has no default.
 	Database string
-	Charset  string
-	Loc      *time.Location
+	// Charset is the connection charset passed to the driver as a parameter.
+	// Zero means DefaultCharset.
+	Charset string
+	// Loc is the location used to interpret DATETIME values. Zero means
+	// time.Local.
+	Loc *time.Location
 
-	MaxOpenConns    int
-	MaxIdleConns    int
+	// MaxOpenConns is the maximum number of open connections. Zero means
+	// DefaultMaxOpenConns; negative values are rejected.
+	MaxOpenConns int
+	// MaxIdleConns is the maximum number of idle connections. Zero means
+	// DefaultMaxIdleConns; negative values are rejected.
+	MaxIdleConns int
+	// ConnMaxLifetime limits how long a connection may be reused. Zero means
+	// DefaultConnMaxLifetime; negative values are rejected.
 	ConnMaxLifetime time.Duration
-	ConnectTimeout  time.Duration
+	// ConnectTimeout is written to the driver DSN as the dial timeout and also
+	// bounds each ping attempt performed by Open. Zero means
+	// DefaultConnectTimeout; negative values are rejected.
+	ConnectTimeout time.Duration
 }
 
 // Load reads prefix-prefixed variables such as DB_HOST and DB_PORT, falling
