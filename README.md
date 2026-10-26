@@ -432,3 +432,7 @@ curl 'http://127.0.0.1:8080/users?name=alice&status=0&minAge=18&current=1&size=2
 ```
 
 测试还会比较三种 Controller 的 JSON 响应，包含零值条件、无记录、越界页和非法参数。
+
+## 许可证
+
+[Apache License 2.0](LICENSE)

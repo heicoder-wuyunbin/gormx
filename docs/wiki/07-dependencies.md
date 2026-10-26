@@ -17,7 +17,7 @@ go 1.22
 | 模块路径 | `github.com/heicoder-wuyunbin/gormx` | 与 GitHub 仓库地址一致，可通过 `go get` 引用 |
 | Go 版本指令 | `go 1.22` | 最低语言/工具链要求；本机验证使用 Go 1.26.1 |
 | 包结构 | 根目录单包 `gormx` + 两个示例包 | 核心库不拆子包 |
-| 许可证 | 仓库当前未声明 | 发布前需确定 |
+| 许可证 | Apache License 2.0 | 见仓库根目录 [LICENSE](../../LICENSE) |
 
 ## 2. 直接依赖
 
@@ -136,7 +136,7 @@ SQLite 依赖 `mattn/go-sqlite3`，需要：
 ## 7. 发布前需要处理
 
 1. ~~把 `module gormx` 改为真实仓库路径~~（已完成：`github.com/heicoder-wuyunbin/gormx`）。
-2. 确定许可证与版本策略。
+2. ~~确定许可证与版本策略~~（已采用 Apache License 2.0，首个带许可证版本 `v0.1.1`）。
 3. 建立 CI 矩阵：Go 版本 × 数据库（至少 SQLite + MySQL）× 竞态 + 短时 fuzz。
 4. 固定依赖升级策略，定期运行 `go mod verify`、`go vet`、`go test -race`。
 
