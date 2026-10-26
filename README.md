@@ -72,6 +72,29 @@ page, err := dao.SelectPage(ctx, query, gormx.PageRequest{
 
 > `NewDAO` 只应接收原始 DB 或事务句柄，会清除已附加的查询条件。不要传入带租户条件的 `db.Where(...)` 并期望条件继续生效。租户条件必须显式加入 Wrapper，复杂 GORM Scope 查询使用原生 GORM。
 
+## 从环境变量建立连接（可选）
+
+`env` 子包只负责“环境变量优先、调用方默认值兜底”，不内置地址、账号或口令；默认值属于应用：
+
+```go
+cfg, err := env.Load("DB_", env.MySQLConfig{
+    Host: "127.0.0.1", Port: 3306,
+    User: "root", Password: "secret", Database: "app",
+})
+if err != nil {
+    return err
+}
+db, err := env.Open(ctx, cfg, env.WithConnectRetry(60*time.Second, 2*time.Second))
+```
+
+- 读取 `DB_HOST`、`DB_PORT`、`DB_NAME`、`DB_USER`、`DB_PASSWORD`、`DB_CHARSET`、`DB_LOC`、`DB_MAX_OPEN_CONNS`、`DB_MAX_IDLE_CONNS`、`DB_CONN_MAX_LIFETIME`、`DB_CONNECT_TIMEOUT`；`DB_DSN` 整体覆盖分项，需自带 `parseTime=True`。
+- 前缀由应用决定（如 `env.Load("APP_", ...)`），同一进程内多个服务不会争抢变量名。
+- 库内只对端口、字符集、时区、连接池和超时提供中立兜底；`Host`、`User`、`Password`、`Database` 没有默认值，`Host` 缺失直接返回 `ErrInvalidConfig`。
+- `Open` 设置连接池后主动 Ping，失败会关闭连接；错误与日志不包含密码。重试默认关闭，由调用方按容器启动竞态显式开启。
+- `FROM scratch` 镜像需要内嵌 `time/tzdata`，否则 `DB_LOC=Local` 会静默退化为 UTC；也可改用 `DB_LOC=UTC`。
+
+[实现与测试](env/env.go)
+
 ## 两种 Wrapper 风格
 
 字符串字段版接受 Go 字段名或 GORM 列名，按模型白名单校验，拒绝未知字段、忽略字段和 SQL 片段。所有列通过 `clause.Column` 引用，普通值参数化绑定。
@@ -128,6 +151,7 @@ Wrapper 和 DAO 可以并发复用；不要并发修改传入的指针、map 或
 | 分组与排序 | `And/Or`、`OrderByAsc/OrderByDesc` |
 | 类型条件 | `Where/WhereIf`、`All/Any`、`Column` 比较方法、`Like`、`OrderBy` |
 | 多表查询 | `TableOf/Bind`、`NewJoinQuery`、`InnerJoin/LeftJoin`、`On`、`Select`、`JoinList/JoinPage` |
+| 连接初始化 | `env.Load`、`env.Open`、`env.WithConnectRetry` |
 
 - `First/GetByID` 无记录返回 `gorm.ErrRecordNotFound`；`List/Page.Records` 无记录返回非 nil 空切片。
 - `ByID` 支持单个字符串或整数主键，数字字符串会严格解析；复合或特殊类型主键请使用 Wrapper。
